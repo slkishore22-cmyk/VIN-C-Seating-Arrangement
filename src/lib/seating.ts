@@ -159,61 +159,24 @@ export interface AllocationResult {
   balance: Student[];
 }
 
+/**
+ * Block sizes the allocation actually uses: only the main group for criss-cross (15 in 5 × 9),
+ * every group for rotate (14 in 7 × 6).
+ */
+export const allocationBlockSizes = (config: RoomConfig) =>
+  config.pattern === 'rotate' ? blockSizes(config) : blockSizes(config).slice(0, 1);
+
 export function allocateSeating(all: Student[], config: RoomConfig): AllocationResult {
   const general = all.filter((s) => s.isGeneral);
   const normal = all.filter((s) => !s.isGeneral);
   const generalRooms = allocateGeneral(general, 1);
   const firstRoomNo = generalRooms.length + 1;
 
-  // One queue per degree + subject, rolls ascending.
-  const queues = new Map<string, { examCode: string; students: Student[] }>();
-  for (const s of normal) {
-    const key = `${s.examCode}|${normDept(s.department)}`;
-    if (!queues.has(key)) queues.set(key, { examCode: s.examCode, students: [] });
-    queues.get(key)!.students.push(s);
-  }
-  const pending = Array.from(queues.values());
-  for (const q of pending) q.students.sort(compareRolls);
-
-  const proto = buildSlots(roomRows(config), config.mainColumns, config.seatsPerColumn, config.pattern);
-  // Big groups first (the 15-seat main-column groups in 5 × 9), then the middle-column groups.
-  const groupOrder = GROUPS.filter((g) => proto[g].length > 0).sort((a, b) => proto[b].length - proto[a].length);
-  /** Below this, a degree + subject remainder is too small for any group and goes to balance. */
-  const minBlock = Math.min(...groupOrder.map((g) => proto[g].length));
-
-  /** Queue with the most students left that satisfies `ok`; ties by exam code. */
-  const largest = (ok: (q: (typeof pending)[number]) => boolean) =>
-    pending
-      .filter(ok)
-      .sort((a, b) => b.students.length - a.students.length || a.examCode.localeCompare(b.examCode))[0];
-
-  // Room by room, every seat group is filled with a block cut from one degree + subject, so each
-  // bench gets its full set of students. The subject with the most students left goes first.
-  // An exam code takes only one group per room, so front/back and side-by-side seats never share
-  // a subject. A group takes a full-size block when some subject still has that many students;
-  // otherwise the largest remainder that is at least the smallest group size.
-  const rooms: Room[] = [];
-  while (pending.some((q) => q.students.length >= minBlock)) {
-    const room = createEmptyRoom(firstRoomNo + rooms.length, config);
-    const used = new Set<string>();
-    for (const g of groupOrder) {
-      const size = proto[g].length;
-      const q =
-        largest((q) => !used.has(q.examCode) && q.students.length >= size) ??
-        largest((q) => !used.has(q.examCode) && q.students.length >= minBlock);
-      if (!q) continue;
-      const block = q.students.splice(0, size);
-      proto[g].forEach((slot, i) => {
-        if (i < block.length) room.grid[slot.row][slot.col] = block[i];
-      });
-      used.add(q.examCode);
-    }
-    refreshStudents(room);
-    if (room.students.length === 0) break;
-    rooms.push(room);
-  }
-
-  const balance = pending.flatMap((q) => q.students);
+  // 42 (rotate) and 45 (criss-cross) follow separate rules.
+  const { rooms, balance } =
+    config.pattern === 'rotate'
+      ? allocateRoomByRoom(normal, config, firstRoomNo)
+      : allocateMainBlocks(normal, config, firstRoomNo);
 
   balance.sort(
     (a, b) => a.examCode.localeCompare(b.examCode) || a.department.localeCompare(b.department) || compareRolls(a, b),
@@ -224,6 +187,129 @@ export function allocateSeating(all: Student[], config: RoomConfig): AllocationR
     console.warn(`[seating] Mismatch: ${all.length} students vs ${placed} seated + ${balance.length} balance.`);
 
   return { rooms: [...generalRooms, ...rooms], balance };
+}
+
+/**
+ * Criss-cross (45 = 5 × 9): each degree + subject is cut into blocks of the main group size only
+ * (15), e.g. 50 → 15 × 3 + 5 balance, 29 → 15 + 14 balance. Each block takes one whole seat group;
+ * an exam code takes at most one group per room. The highest-count subject goes first.
+ */
+function allocateMainBlocks(normal: Student[], config: RoomConfig, firstRoomNo: number): AllocationResult {
+  const [size] = blockSizes(config);
+
+  const groups = new Map<string, Student[]>();
+  for (const s of normal) {
+    const key = `${s.examCode}|${normDept(s.department)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(s);
+  }
+  const codeTotals = new Map<string, number>();
+  for (const s of normal) codeTotals.set(s.examCode, (codeTotals.get(s.examCode) ?? 0) + 1);
+
+  type Block = { examCode: string; codeTotal: number; groupSize: number; seq: number; students: Student[] };
+  const blocks: Block[] = [];
+  const balance: Student[] = [];
+  for (const list of groups.values()) {
+    const sorted = [...list].sort(compareRolls);
+    let i = 0;
+    for (; i + size <= sorted.length; i += size)
+      blocks.push({
+        examCode: sorted[0].examCode,
+        codeTotal: codeTotals.get(sorted[0].examCode)!,
+        groupSize: sorted.length,
+        seq: i,
+        students: sorted.slice(i, i + size),
+      });
+    balance.push(...sorted.slice(i));
+  }
+  // Highest-count subject first, so it takes the first rooms; within a subject, larger degree first.
+  blocks.sort(
+    (a, b) =>
+      b.codeTotal - a.codeTotal ||
+      a.examCode.localeCompare(b.examCode) ||
+      b.groupSize - a.groupSize ||
+      a.students[0].department.localeCompare(b.students[0].department) ||
+      a.seq - b.seq,
+  );
+
+  const rooms: Room[] = [];
+  const slots: SlotMap[] = [];
+  const roomCodes: Set<string>[] = [];
+  let free: { roomIdx: number; group: SeatGroup; cap: number }[] = [];
+
+  const addRoom = () => {
+    const idx = rooms.length;
+    rooms.push(createEmptyRoom(firstRoomNo + idx, config));
+    const sl = buildSlots(rooms[idx].grid.length, config.mainColumns, config.seatsPerColumn, config.pattern);
+    slots.push(sl);
+    roomCodes.push(new Set());
+    for (const g of GROUPS) if (sl[g].length > 0) free.push({ roomIdx: idx, group: g, cap: sl[g].length });
+  };
+
+  for (const block of blocks) {
+    const n = block.students.length;
+    let pick: (typeof free)[number] | undefined;
+    for (;;) {
+      const fits = free.filter((f) => f.cap >= n && !roomCodes[f.roomIdx].has(block.examCode));
+      pick = fits.find((f) => f.cap === n) ?? fits.sort((a, b) => a.cap - b.cap || a.roomIdx - b.roomIdx)[0];
+      if (pick) break;
+      addRoom();
+    }
+    const target = rooms[pick.roomIdx];
+    slots[pick.roomIdx][pick.group].slice(0, n).forEach((slot, i) => {
+      target.grid[slot.row][slot.col] = block.students[i];
+    });
+    roomCodes[pick.roomIdx].add(block.examCode);
+    free = free.filter((f) => f !== pick);
+  }
+  rooms.forEach(refreshStudents);
+  return { rooms, balance };
+}
+
+/**
+ * Rotate (42 = 7 × 6): room by room, each of the three 14-seat groups takes a 14-block from the
+ * degree + subject with the most students left, three different subjects per room. Remainders
+ * smaller than 14 go to balance.
+ */
+function allocateRoomByRoom(normal: Student[], config: RoomConfig, firstRoomNo: number): AllocationResult {
+  const queues = new Map<string, { examCode: string; students: Student[] }>();
+  for (const s of normal) {
+    const key = `${s.examCode}|${normDept(s.department)}`;
+    if (!queues.has(key)) queues.set(key, { examCode: s.examCode, students: [] });
+    queues.get(key)!.students.push(s);
+  }
+  const pending = Array.from(queues.values());
+  for (const q of pending) q.students.sort(compareRolls);
+
+  const proto = buildSlots(roomRows(config), config.mainColumns, config.seatsPerColumn, config.pattern);
+  const groupOrder = GROUPS.filter((g) => proto[g].length > 0).sort((a, b) => proto[b].length - proto[a].length);
+  const minBlock = Math.min(...groupOrder.map((g) => proto[g].length));
+
+  /** Queue with the most students left that satisfies `ok`; ties by exam code. */
+  const largest = (ok: (q: (typeof pending)[number]) => boolean) =>
+    pending
+      .filter(ok)
+      .sort((a, b) => b.students.length - a.students.length || a.examCode.localeCompare(b.examCode))[0];
+
+  const rooms: Room[] = [];
+  while (pending.some((q) => q.students.length >= minBlock)) {
+    const room = createEmptyRoom(firstRoomNo + rooms.length, config);
+    const used = new Set<string>();
+    for (const g of groupOrder) {
+      const size = proto[g].length;
+      const q = largest((q) => !used.has(q.examCode) && q.students.length >= size);
+      if (!q) continue;
+      const block = q.students.splice(0, size);
+      proto[g].forEach((slot, i) => {
+        room.grid[slot.row][slot.col] = block[i];
+      });
+      used.add(q.examCode);
+    }
+    refreshStudents(room);
+    if (room.students.length === 0) break;
+    rooms.push(room);
+  }
+  return { rooms, balance: pending.flatMap((q) => q.students) };
 }
 
 /** Same-exam-code neighbours (right or below), ignoring general rooms. */

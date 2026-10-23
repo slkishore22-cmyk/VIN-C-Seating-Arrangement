@@ -5,7 +5,7 @@ import PrintSheet from '@/components/PrintSheet';
 import BalancePanel, { NEW_ROOM } from '@/components/BalancePanel';
 import { deptColor } from '@/lib/colors';
 import { buildRecords, publishSession, supabase } from '@/lib/publish';
-import { blockSizes, compareRolls, createEmptyRoom, findViolations, placeInRoom, seatGroup } from '@/lib/seating';
+import { allocationBlockSizes, compareRolls, createEmptyRoom, findViolations, placeInRoom, seatGroup } from '@/lib/seating';
 import { readDrag, startDrag, type DragSource } from '@/lib/drag';
 import type { Room, RoomConfig, Seat, Student } from '@/lib/types';
 
@@ -253,7 +253,7 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
       balance={balance}
       rooms={rooms}
       roomLabel={roomLabel}
-      blockSizes={blockSizes(config)}
+      blockSizes={allocationBlockSizes(config)}
       onPlace={placeBalance}
       onReturn={returnToBalance}
       placed={placedBatches}
