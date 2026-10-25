@@ -29,9 +29,19 @@ export type Seat = Student | null;
  */
 export type SeatPattern = 'criss-cross' | 'rotate';
 
+/**
+ * Seating arrangement. One degree + subject takes the main seats; the gaps between them are filled
+ * with other subjects. The same subject may sit one behind another, never side by side.
+ *  - 'one-line': edge seats of each bench (A _ C), middle seats another subject
+ *  - 'gap': A _ C on every other row, the rows between another subject
+ *  - 'cross': a checkerboard
+ */
+export type SeatSpacing = 'one-line' | 'gap' | 'cross';
+
 export interface Room {
   roomNumber: number;
   pattern?: SeatPattern;
+  spacing?: SeatSpacing;
   students: Student[];
   grid: Seat[][];
   totalRows: number;
@@ -46,4 +56,5 @@ export interface RoomConfig {
   mainColumns: number;
   seatsPerColumn: number;
   pattern?: SeatPattern;
+  spacing?: SeatSpacing;
 }

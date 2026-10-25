@@ -5,7 +5,14 @@ import PrintSheet from '@/components/PrintSheet';
 import BalancePanel, { NEW_ROOM } from '@/components/BalancePanel';
 import { deptColor } from '@/lib/colors';
 import { buildRecords, publishSession, supabase } from '@/lib/publish';
-import { allocationBlockSizes, compareRolls, createEmptyRoom, findViolations, placeInRoom, seatGroup } from '@/lib/seating';
+import {
+  allocationBlockSizes,
+  compareRolls,
+  createEmptyRoom,
+  findViolations,
+  placeInRoom,
+  seatGroup,
+} from '@/lib/seating';
 import { readDrag, startDrag, type DragSource } from '@/lib/drag';
 import type { Room, RoomConfig, Seat, Student } from '@/lib/types';
 
@@ -44,6 +51,8 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
   const [publishedCount, setPublishedCount] = useState(0);
   const [showQr, setShowQr] = useState(false);
   const [names, setNames] = useState<Record<number, string>>({});
+  /** Room tab being renamed (double-click), with its draft name. */
+  const [renaming, setRenaming] = useState<{ roomNumber: number; draft: string } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
   /** True while a seated student is being dragged; shows the "back to balance" drop zone. */
   const [draggingSeat, setDraggingSeat] = useState(false);
@@ -127,7 +136,11 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
     for (const roll of rolls) {
       const loc = locations.get(roll);
       if (!loc) continue;
-      if (!grids.has(loc.roomIdx)) grids.set(loc.roomIdx, rooms[loc.roomIdx].grid.map((r) => [...r]));
+      if (!grids.has(loc.roomIdx))
+        grids.set(
+          loc.roomIdx,
+          rooms[loc.roomIdx].grid.map((r) => [...r]),
+        );
       grids.get(loc.roomIdx)![loc.row][loc.col] = null;
       back.push(loc.student);
     }
@@ -173,14 +186,26 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
     setPublished(false);
   };
 
+  /** Appends an empty room with the configured layout and opens it. */
+  const addRoom = () => {
+    const roomNumber = Math.max(0, ...rooms.map((r) => r.roomNumber)) + 1;
+    commit([...rooms, createEmptyRoom(roomNumber, config)], balance);
+    setCurrent(rooms.length);
+  };
+
   /** Shows the dropped student's subject so the move is visible in the grid. */
-  const reveal = (s: Student) => setVisibleCodes((prev) => (prev.has(s.examCode) ? prev : new Set(prev).add(s.examCode)));
+  const reveal = (s: Student) =>
+    setVisibleCodes((prev) => (prev.has(s.examCode) ? prev : new Set(prev).add(s.examCode)));
 
   /** Drop onto a seat: empty seat → move there; occupied seat → swap (a balance drop sends the occupant to balance). */
   const dropOnSeat = (src: DragSource, roomIdx: number, row: number, col: number) => {
     const grids = new Map<number, Seat[][]>();
     const gridOf = (i: number) => {
-      if (!grids.has(i)) grids.set(i, rooms[i].grid.map((r) => [...r]));
+      if (!grids.has(i))
+        grids.set(
+          i,
+          rooms[i].grid.map((r) => [...r]),
+        );
       return grids.get(i)!;
     };
     const target = gridOf(roomIdx);
@@ -224,7 +249,7 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
     if (!s) return;
     const res = placeInRoom(rooms[roomIdx], [s]);
     if (res.unplaced.length > 0) {
-      alert(`Room ${roomLabel(rooms[roomIdx])} has no free seat.`);
+      alert(`Room ${roomLabel(rooms[roomIdx])} has no free seat for this subject.`);
       return;
     }
     const fromGrid = rooms[src.roomIdx].grid.map((r) => [...r]);
@@ -297,7 +322,9 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
     if (publishing || published) return;
     if (
       balance.length > 0 &&
-      !confirm(`${balance.length} balance student(s) are not seated yet and won't be able to find a seat. Publish anyway?`)
+      !confirm(
+        `${balance.length} balance student(s) are not seated yet and won't be able to find a seat. Publish anyway?`,
+      )
     )
       return;
     setPublishing(true);
@@ -326,15 +353,35 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
           <tr>
             {Array.from({ length: mainCols }).map((_, mc) => (
               <Fragment key={mc}>
-                {Array.from({ length: spc }).map((_, s) => (
-                  <th
-                    key={s}
-                    className="border border-border px-2 py-2 text-xs font-semibold bg-secondary text-secondary-foreground"
-                    style={{ minWidth: 90 }}
-                  >
-                    {mc * spc + s + 1}
-                  </th>
-                ))}
+                {Array.from({ length: spc }).map((_, s) => {
+                  const col = mc * spc + s;
+                  const rolls = r.grid.map((row) => row[col]?.rollNumber).filter((roll): roll is string => !!roll);
+                  return (
+                    <th
+                      key={s}
+                      className="border border-border px-2 py-2 text-xs font-semibold bg-secondary text-secondary-foreground"
+                      style={{ minWidth: 90 }}
+                    >
+                      <div className="flex items-center justify-center gap-1.5">
+                        {col + 1}
+                        {rolls.length > 0 && (
+                          <button
+                            onClick={() => {
+                              if (
+                                confirm(`Move the ${rolls.length} students in column ${col + 1} to the Balance list?`)
+                              )
+                                unseat(rolls);
+                            }}
+                            title={`Empty column ${col + 1} — send its students to the Balance list`}
+                            className="no-print px-1.5 rounded text-[10px] font-medium text-destructive border border-destructive/30 hover:bg-destructive/10"
+                          >
+                            ✕ Empty
+                          </button>
+                        )}
+                      </div>
+                    </th>
+                  );
+                })}
                 {mc < mainCols - 1 && <th className="w-4 border-none" style={{ minWidth: 16 }} />}
               </Fragment>
             ))}
@@ -378,7 +425,7 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
                   border = '1px solid hsl(var(--border))';
                   content = (
                     <span className="text-muted-foreground" style={{ fontSize: 11, fontWeight: 600 }}>
-                      {r.isGeneral ? (pos % 2 === 0 ? 'A' : 'B') : seatGroup(ri, ci, spc, r.pattern)}
+                      {r.isGeneral ? (pos % 2 === 0 ? 'A' : 'B') : seatGroup(ri, ci, spc, r.pattern, r.spacing)}
                     </span>
                   );
                 }
@@ -439,7 +486,7 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
   const studentLink = `${window.location.origin}/student?session=${sessionId}`;
 
   return (
-    <div className="max-w-6xl mx-auto px-4">
+    <div className="max-w-6xl xl:max-w-[1500px] mx-auto px-4">
       {draggingSeat && (
         <div
           onDragOver={(e) => {
@@ -483,7 +530,10 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
       </div>
 
       {totalViolations > 0 && (
-        <div className="no-print mb-6 p-4 rounded-2xl border-2" style={{ backgroundColor: '#FEF2F2', borderColor: '#EF4444' }}>
+        <div
+          className="no-print mb-6 p-4 rounded-2xl border-2"
+          style={{ backgroundColor: '#FEF2F2', borderColor: '#EF4444' }}
+        >
           <p className="font-bold text-sm" style={{ color: '#DC2626' }}>
             ⚠ SEATING VIOLATIONS DETECTED
           </p>
@@ -507,135 +557,167 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
         </div>
       )}
 
-      {balancePanel}
+      {/* Wide screens: balance lists on the left, room beside them. */}
+      <div className="xl:grid xl:grid-cols-[400px_minmax(0,1fr)] xl:gap-6 xl:items-start">
+        <aside className="xl:sticky xl:top-4">{balancePanel}</aside>
 
-      <div className="no-print flex flex-wrap gap-2 mb-4 justify-center">
-        {rooms.map((r, i) => {
-          const bad = violations[i].count > 0;
-          return (
+        <div className="min-w-0">
+          <div className="no-print flex flex-wrap gap-2 mb-6 justify-center">
+            {rooms.map((r, i) => {
+              const bad = violations[i].count > 0;
+              if (renaming?.roomNumber === r.roomNumber) {
+                const save = () => {
+                  setNames((prev) => ({ ...prev, [r.roomNumber]: renaming.draft.trim() }));
+                  setRenaming(null);
+                };
+                return (
+                  <input
+                    key={r.roomNumber}
+                    autoFocus
+                    type="text"
+                    value={renaming.draft}
+                    maxLength={20}
+                    onFocus={(e) => e.target.select()}
+                    onChange={(e) => setRenaming({ roomNumber: r.roomNumber, draft: e.target.value })}
+                    onBlur={save}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') save();
+                      else if (e.key === 'Escape') setRenaming(null);
+                    }}
+                    placeholder={String(r.roomNumber)}
+                    aria-label={`Rename room ${r.roomNumber}`}
+                    className="px-3 py-2 w-32 rounded-lg text-sm font-medium border-2 border-foreground bg-background text-center focus:outline-none"
+                  />
+                );
+              }
+              return (
+                <button
+                  key={r.roomNumber}
+                  onClick={() => setCurrent(i)}
+                  onDoubleClick={() => setRenaming({ roomNumber: r.roomNumber, draft: names[r.roomNumber] ?? '' })}
+                  title="Double-click to rename"
+
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    if (dragOver !== `tab-${i}`) setDragOver(`tab-${i}`);
+                  }}
+                  onDragLeave={() => setDragOver((k) => (k === `tab-${i}` ? null : k))}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOver(null);
+                    const src = readDrag(e);
+                    if (src) dropOnRoom(src, i);
+                  }}
+                  className={`px-5 py-2 rounded-lg text-sm font-medium transition-all border ${
+                    i === current
+                      ? 'bg-foreground text-background border-foreground'
+                      : 'bg-background text-foreground border-border hover:border-foreground'
+                  }`}
+                  style={{
+                    ...(bad && i !== current ? { borderColor: '#EF4444' } : {}),
+                    ...(dragOver === `tab-${i}` ? { outline: '3px dashed #1565C0', outlineOffset: 2 } : {}),
+                  }}
+                >
+                  Room {roomLabel(r)}
+                  {bad && <span style={{ color: '#EF4444' }}> •</span>}
+                </button>
+              );
+            })}
             <button
-              key={r.roomNumber}
-              onClick={() => setCurrent(i)}
-              onDragOver={(e) => {
-                e.preventDefault();
-                if (dragOver !== `tab-${i}`) setDragOver(`tab-${i}`);
-              }}
-              onDragLeave={() => setDragOver((k) => (k === `tab-${i}` ? null : k))}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragOver(null);
-                const src = readDrag(e);
-                if (src) dropOnRoom(src, i);
-              }}
-              className={`px-5 py-2 rounded-lg text-sm font-medium transition-all border ${
-                i === current
-                  ? 'bg-foreground text-background border-foreground'
-                  : 'bg-background text-foreground border-border hover:border-foreground'
-              }`}
-              style={{
-                ...(bad && i !== current ? { borderColor: '#EF4444' } : {}),
-                ...(dragOver === `tab-${i}` ? { outline: '3px dashed #1565C0', outlineOffset: 2 } : {}),
-              }}
+              onClick={addRoom}
+              title="Add an empty room — fill it from the Balance list or by dragging students"
+              className="px-5 py-2 rounded-lg text-sm font-medium transition-all border border-dashed border-border text-muted-foreground hover:border-foreground hover:text-foreground"
             >
-              Room {roomLabel(r)}
-              {bad && <span style={{ color: '#EF4444' }}> •</span>}
+              + Add room
             </button>
-          );
-        })}
-      </div>
-
-      <div className="no-print mb-6 flex items-center justify-center gap-2 flex-wrap">
-        <span className="text-xs text-muted-foreground">Rename room:</span>
-        {rooms.map((r) => (
-          <div key={r.roomNumber} className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground">#{r.roomNumber} →</span>
-            <input
-              type="text"
-              value={names[r.roomNumber] ?? ''}
-              onChange={(e) => setNames((prev) => ({ ...prev, [r.roomNumber]: e.target.value }))}
-              placeholder={String(r.roomNumber)}
-              maxLength={20}
-              className="px-2 py-1 text-xs border border-border rounded-md bg-background w-24 focus:outline-none focus:ring-1 focus:ring-foreground"
-            />
           </div>
-        ))}
-      </div>
 
-      <div className="no-print mb-3 p-3 bg-secondary rounded-2xl">
-        <div className="flex flex-wrap gap-2">
-          {codeCounts.map(([code, count]) => {
-            const on = visibleCodes.has(code);
-            return (
-              <button
-                key={code}
-                onClick={() => toggleCode(code)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-all"
-                style={{
-                  border: on ? '2px solid hsl(var(--primary))' : '1px solid hsl(var(--border))',
-                  background: on ? 'hsl(var(--primary) / 0.1)' : 'hsl(var(--background))',
-                  fontWeight: on ? 600 : 400,
-                }}
-              >
-                <span
-                  className="inline-block rounded-full flex-shrink-0"
-                  style={{ width: 10, height: 10, background: on ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))' }}
-                />
-                {code}
-                <span style={{ fontSize: 11, color: on ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))' }}>{count}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+          <div className="no-print mb-3 p-3 bg-secondary rounded-2xl">
+            <div className="flex flex-wrap gap-2">
+              {codeCounts.map(([code, count]) => {
+                const on = visibleCodes.has(code);
+                return (
+                  <button
+                    key={code}
+                    onClick={() => toggleCode(code)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-all"
+                    style={{
+                      border: on ? '2px solid hsl(var(--primary))' : '1px solid hsl(var(--border))',
+                      background: on ? 'hsl(var(--primary) / 0.1)' : 'hsl(var(--background))',
+                      fontWeight: on ? 600 : 400,
+                    }}
+                  >
+                    <span
+                      className="inline-block rounded-full flex-shrink-0"
+                      style={{
+                        width: 10,
+                        height: 10,
+                        background: on ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))',
+                      }}
+                    />
+                    {code}
+                    <span style={{ fontSize: 11, color: on ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))' }}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-      <div className="no-print flex items-center gap-3 mb-6">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setVisibleCodes(new Set(codeCounts.map(([c]) => c)))}
-          className="text-xs rounded-md"
-        >
-          Fill All
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setVisibleCodes(new Set())}
-          className="text-xs rounded-md border-destructive/30 text-destructive hover:bg-destructive/10"
-        >
-          Clear
-        </Button>
-        <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-          <div className="h-full rounded-full transition-all duration-300" style={{ width: `${pct}%`, background: '#2E7D32' }} />
-        </div>
-        <span className="text-xs text-muted-foreground whitespace-nowrap">
-          {revealed} / {totalSeated} — {pct}%
-        </span>
-      </div>
-
-      <div className="no-print">
-        <h3 className="text-xl font-bold text-center mb-4">
-          Room {roomLabel(room)}
-          {room.isGeneral && (
-            <span
-              className="text-xs font-semibold ml-2 px-2 py-0.5 rounded-full"
-              style={{ background: 'hsl(45, 100%, 90%)', color: 'hsl(35, 80%, 35%)' }}
+          <div className="no-print flex items-center gap-3 mb-6">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVisibleCodes(new Set(codeCounts.map(([c]) => c)))}
+              className="text-xs rounded-md"
             >
-              GENERAL
+              Fill All
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVisibleCodes(new Set())}
+              className="text-xs rounded-md border-destructive/30 text-destructive hover:bg-destructive/10"
+            >
+              Clear
+            </Button>
+            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-300"
+                style={{ width: `${pct}%`, background: '#2E7D32' }}
+              />
+            </div>
+            <span className="text-xs text-muted-foreground whitespace-nowrap">
+              {revealed} / {totalSeated} — {pct}%
             </span>
-          )}
-          <span className="text-sm font-normal text-muted-foreground ml-2">({room.students.length} students)</span>
-          {roomViolations > 0 && (
-            <span className="text-sm font-semibold ml-2" style={{ color: '#EF4444' }}>
-              — {roomViolations} violation{roomViolations !== 1 ? 's' : ''}
-            </span>
-          )}
-        </h3>
-        <div className="overflow-x-auto pb-4">{renderGrid(room, current)}</div>
-        <p className="text-center text-xs text-muted-foreground">
-          Drag a student onto an empty seat to move, onto another student to swap, onto a room tab to send them there,
-          or onto the Balance list to unseat. Use ← → arrow keys to switch rooms.
-        </p>
+          </div>
+
+          <div className="no-print">
+            <h3 className="text-xl font-bold text-center mb-4">
+              Room {roomLabel(room)}
+              {room.isGeneral && (
+                <span
+                  className="text-xs font-semibold ml-2 px-2 py-0.5 rounded-full"
+                  style={{ background: 'hsl(45, 100%, 90%)', color: 'hsl(35, 80%, 35%)' }}
+                >
+                  GENERAL
+                </span>
+              )}
+              <span className="text-sm font-normal text-muted-foreground ml-2">({room.students.length} students)</span>
+              {roomViolations > 0 && (
+                <span className="text-sm font-semibold ml-2" style={{ color: '#EF4444' }}>
+                  — {roomViolations} violation{roomViolations !== 1 ? 's' : ''}
+                </span>
+              )}
+            </h3>
+            <div className="overflow-x-auto pb-4">{renderGrid(room, current)}</div>
+            <p className="text-center text-xs text-muted-foreground">
+              Drag a student onto an empty seat to move, onto another student to swap, onto a room tab to send them
+              there, or onto the Balance list to unseat. Use ← → arrow keys to switch rooms.
+            </p>
+          </div>
+        </div>
       </div>
 
       <div className="no-print mt-8 flex flex-wrap gap-3 justify-center">
@@ -686,7 +768,10 @@ export default function AllocateStep({ rooms, balance, config, onChange, onBack 
               >
                 Copy Link
               </button>
-              <button onClick={() => setShowQr(false)} className="flex-1 p-2.5 rounded-md bg-neutral-900 text-white text-[13px]">
+              <button
+                onClick={() => setShowQr(false)}
+                className="flex-1 p-2.5 rounded-md bg-neutral-900 text-white text-[13px]"
+              >
                 Close
               </button>
             </div>

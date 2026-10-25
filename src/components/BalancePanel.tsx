@@ -104,7 +104,7 @@ export default function BalancePanel({
   };
 
   return (
-    <div className="no-print mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div className="no-print mb-6 grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-1 gap-4">
       {/* Left: students still waiting for a seat */}
       <div
         {...dropProps}
